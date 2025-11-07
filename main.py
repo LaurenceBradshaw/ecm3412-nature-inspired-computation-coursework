@@ -1,500 +1,395 @@
-import time
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
-from typing import Callable
 import os
 
 
-def fitness_diff_based(chromosome: np.ndarray, weights: np.ndarray, b: int) -> float:
-    '''
-    Compute the difference between the min and max bin sums, then compute the fitness
+class Bin_packing_problem:
 
-    This is the fitness function specified in the coursework.
+    def __init__(self, 
+                 num_bins: int,
+                 mutation_rate: float,
+                 tournament_size: int,
+                 weight_function: callable,
+                 fitness_function: callable,
+                 crossover_rate: float=0.8,
+                 num_items: int=500,
+                 population_size: int=100,
+                 max_evaluations: int=10000,
+                 num_trials: int=5):
+        self.num_bins = num_bins
+        self.mutation_rate = mutation_rate
+        self.tournament_size = tournament_size
+        self.weight_function = weight_function
+        self.fitness_function = fitness_function
+        self.crossover_rate = crossover_rate
+        self.num_items = num_items
+        self.population_size = population_size
+        self.max_evaluations = max_evaluations
+        self.evaluations = 0
+        self.has_run = False
+        self.num_trials = num_trials
+        num_gens = max_evaluations // population_size
+        self.fitness_history = np.zeros((num_trials, num_gens ), dtype=float)
+        self.best_solutions = np.zeros((num_trials, num_items), dtype=int)
+        self.best_bin_weights = np.zeros((num_trials, num_bins), dtype=float)
+        self.rng = np.random.default_rng() # will be seeded later per trail
+        self.population = np.zeros((population_size, num_items), dtype=int)
 
-    Parameters:
-        chromosome: 1d-array of length k with values 1..b
-        weights: 1d-array of length k
-        b: number of bins
-    Returns:
-        fitness: fitness value of the chromosome
-        d: difference between max and min bin sums
-    '''
-    # bins indexed 1..b -> shift to 0..b-1
-    sums = np.bincount(chromosome - 1, weights=weights, minlength=b)
-    d = float(sums.max() - sums.min())
-    fitness = 100.0 / (1.0 + d)
 
-    return fitness
-
-def fitness_cv_based(chromosome: np.ndarray, weights: np.ndarray, b: int) -> float:
-    sums = np.bincount(chromosome - 1, weights=weights, minlength=b)
-    mean_load = float(np.mean(sums))
-    std_dev = float(np.std(sums))
-    cv = std_dev / mean_load if mean_load > 0 else 0.0
-    fitness = 100.0 / (1.0 + 50.0 * cv)
-
-    return fitness # scale factor (50) adjusts sensitivity
-
-def fitness_mse_based(chromosome: np.ndarray, weights: np.ndarray, b: int) -> float:
-    sums = np.bincount(chromosome - 1, weights=weights, minlength=b)
-    mean_load = float(np.mean(sums))
-    mse = float(np.mean((sums - mean_load) ** 2))
-    fitness = 100.0 / (1.0 + mse)
-
-    return fitness
-
-def fitness_range_normalised(chromosome: np.ndarray, weights: np.ndarray, b: int) -> float:
-    sums = np.bincount(chromosome - 1, weights=weights, minlength=b)
-    mean_load = float(np.mean(sums))
-    d = float(sums.max() - sums.min())
-    rel_diff = d / mean_load if mean_load > 0 else 0.0
-    fitness = 100.0 / (1.0 + rel_diff)
-
-    return fitness
-
-def calc_statistics(chromosome: np.ndarray, weights: np.ndarray, b: int) -> dict:
-    '''
-    Calculate statistics for a given chromosome.
-
-    Parameters:
-        chromosome: 1d-array of length k with values 1..b
-        weights: 1d-array of length k
-        b: number of bins
-    Returns:
-        stats: dictionary with keys:
-            "min_load": minimum bin load (float)
-            "max_load": maximum bin load (float)
-            "std_dev": standard deviation of bin loads (float)
-            "cv": coefficient of variation (float)
-            "d": difference between max and min bin loads (float)
-    '''
-    sums = np.bincount(chromosome - 1, weights=weights, minlength=b)
-    min_load = float(sums.min())
-    max_load = float(sums.max())
-    mean_load = float(np.mean(sums))
-    std_dev = float(np.std(sums))
-    cv = std_dev / mean_load if mean_load > 0 else 0.0
-    d = float(max_load - min_load)
-    return {
-        "min_load": min_load,
-        "max_load": max_load,
-        "std_dev": std_dev,
-        "cv": cv,
-        "d": d
-    }
+    def _initialize_population(self) -> np.ndarray:
+        '''
+        Initialize the population with random bin assignments
+        Each individual is represented as an array of integers, where each 
+        integer indicates the bin assignment for the corresponding item
+        '''
+        return self.rng.integers(1, self.num_bins + 1, size=(self.population_size, self.num_items))
     
-def evaluate_population(population: np.ndarray, weights: np.ndarray, b: int, eval_counter: list[int], fitness_fn: Callable[[np.ndarray, np.ndarray, int], float]) -> tuple[np.ndarray, dict]:
-    '''
-    Evaluate the entire population and return fitnesses and d values.
-    Also increment eval_counter[0] by the number of evaluations performed.
+    def _bin_weights(self, individual) -> np.ndarray:
+        '''
+        Calculate the weights of each bin for a given individual
+        '''
+        bin_weights = np.zeros(self.num_bins)
+        for item_index in range(self.num_items):
+            bin_index = individual[item_index] - 1
+            bin_weights[bin_index] += self.weight_function(item_index + 1)
 
-    Parameters:
-        population: 2d-array shape (p, k) of chromosomes
-        weights: 1d-array of length k
-        b: number of bins
-        eval_counter: list with single int element to track number of evaluations (pseudo-pass by reference)
-    Returns:
-        fitnesses: 1d-array of length p with fitness values
-        ds: 1d-array of length p with d values from fitness calculation
-    '''
-    p = population.shape[0]
-    fitnesses = np.empty(p, dtype=float)
-    stats_list = []
-
-    for i in range(p):
-        fitnesses[i] = fitness_fn(population[i], weights, b)
-        assert 0.0 <= fitnesses[i] <= 100.0, f'Invalid fitness {fitnesses[i]}'
-        stats_list.append(calc_statistics(population[i], weights, b))
-        eval_counter[0] += 1
-
-    # Transpose list of dicts to dict of lists
-    stats_dict = {key: [d[key] for d in stats_list] for key in stats_list[0]}
-
-    return fitnesses, stats_dict
-
-def uniform_crossover(parent1: np.ndarray, parent2: np.ndarray, pc: float, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
-    '''
-    1. For each gene position, flip a coin
-    2. If heads, take gene from parent 1; if tails, take gene from parent 2
-    3. Apply crossover with probability pc (crossover rate)
+        return bin_weights
     
-    Parameters:
-        parent1,parent2: chromosomes to crossover
-        pc: float, crossover probability (0 <= pc <= 1)
-        rng: numpy random generator instance
-    Returns:
-        child1,child2: offspring chromosomes
-    '''
-    num_genes = parent1.shape[0]
-
-    if rng.random() < pc:
-        mask = rng.random(size=num_genes) < 0.5
-        child1 = np.where(mask, parent1, parent2)
-        child2 = np.where(mask, parent2, parent1)
-    else:
-        child1 = parent1.copy()
-        child2 = parent2.copy()
-
-    return child1, child2
-
-def mutate(chromosome: np.ndarray, pm: float, b: int, rng: np.random.Generator) -> np.ndarray:
-    '''
-    1. For each gene, with probability pm (mutation rate)
-    2. Randomly change the bin assignment to any valid bin (1 to b)
-
-    Parameters:
-        chromosome: 1d-array of gene values (1..b)
-        pm: mutation probability (0 <= pm <= 1)
-        b: number of bins
-        rng: numpy random generator instance
-    Returns:
-        mutated_chromosome: mutated copy of input chromosome
-    '''
-    num_genes = chromosome.shape[0]
-    mutated_chromosome = chromosome.copy()
-    # for each gene, with probability pm, reassign to random bin 1..b
-    mutation_mask = rng.random(size=num_genes) < pm
-
-    if mutation_mask.any():
-        # random new bins
-        new_bins = rng.integers(1, b+1, size=mutation_mask.sum())
-        mutated_chromosome[mutation_mask] = new_bins
-
-    return mutated_chromosome
-
-def tournament_select(fitnesses: np.ndarray, tournament_size: int, rng: np.random.Generator) -> int:
-    '''
-    1. Randomly select t chromosomes from the population (tournament size)
-    2. Choose the chromosome with the best fitness from this tournament
-
-    Parameters:
-        fitnesses: 1d-array of fitness values for the population
-        tournament_size: int, number of contenders in each tournament (t >= 2)
-        rng: numpy random generator instance
-    Returns:
-        winner_idx: index of chosen parent in the population
-    '''
-    p = fitnesses.shape[0]
-
-    assert tournament_size < p, 'Tournament size must less than population size'
-    
-    contenders = rng.choice(p, size=tournament_size, replace=False)
-    
-    winner_idx = contenders[np.argmax(fitnesses[contenders])]
-    return winner_idx
-
-def initialise_balanced_population(p: int, k: int, b: int, rng: np.random.Generator) -> np.ndarray:
-    """Create p chromosomes, each with roughly equal representation of bins 1..b."""
-    base = np.repeat(np.arange(1, b + 1), k // b)
-    remainder = k % b
-    population = np.empty((p, k), dtype=int)
-
-    for i in range(p):
-        chrom = base.copy()
-        # Distribute the remainder randomly
-        if remainder > 0:
-            extras = rng.choice(np.arange(1, b + 1), size=remainder, replace=False)
-            chrom = np.concatenate([chrom, extras])
-        rng.shuffle(chrom)
-        population[i] = chrom
-
-    return population
-
-def run_ga(weights: np.ndarray, b: int, p: int, pm: float, tournament_size: int, pc: float, max_evaluations: int, seed: int, fitness_fn: Callable[[np.ndarray, np.ndarray, int], float]) -> dict:
-    '''
-    Run the genetic algorithm to solve the bin packing problem as follows:
-    1. Initialize a population of p randomly generated chromosomes.
-    2. Evaluate the fitness of each chromosome in the population.
-    3. Select parents for reproduction using selection method.
-    4. Create offspring through crossover and mutation operations.
-    5. Replace the old population with the new population (or subset).
-    6. If a termination criterion has been reached, then stop. Otherwise return to step 2.
-
-    Parameters:
-        weights: 1d-array of item weights
-        b: number of bins
-        p: population size
-        pm: mutation probability (0 <= pm <= 1)
-        tournament_size: number of contenders in tournament selection (t >= 2)
-        pc: crossover probability (0 <= pc <= 1)
-        max_evaluations: maximum number of fitness evaluations to perform
-        seed: random seed for reproducibility
-    Returns:
-        results: dictionary with keys:
-            "best_fitness": best fitness found  (float)
-            "best_d": best d value found (float)
-            "evaluations": total number of fitness evaluations performed (int)
-            "generations": total number of generations completed (int)
-            "best_chromosome": 1d-array of best chromosome found
-            "best_fitness_history": 1d-array of length max_evaluations with best fitness found at each evaluation step
-            "time_sec": total elapsed time in seconds (float)
-    '''
-    rng = np.random.default_rng(seed)
-    k = weights.shape[0]
-    population = rng.integers(1, b+1, size=(p, k))
-    # population = initialise_balanced_population(p, k, b, rng)
-    eval_counter = [0]  # pseudo-pass by reference
-    best_fitness_history = np.zeros(max_evaluations, dtype=float)
-    start_time = time.time()
-
-    # initial evaluation
-    fitnesses, stats = evaluate_population(population, weights, b, [0], fitness_fn)  # don't count initial evals
-    best_idx = np.argmax(fitnesses)
-    best_fitness = float(fitnesses[best_idx])
-    best_chromosome = population[best_idx].copy()
-    best_d = float(stats["d"][best_idx])
-
-    # record initial population fitness evaluations
-    for i in range(len(fitnesses)):
-        best_fitness = max(best_fitness, fitnesses[i])
-        best_fitness_history[i] = best_fitness
-
-    generation = 0
-    while eval_counter[0] < max_evaluations:
-        generation += 1
-        new_population = np.empty_like(population)
-
-        # carry over best chromosome (elitism)
-        new_population[0] = best_chromosome.copy()
-
-        # fill the rest of new_population
-        i = 1
-        while i < p:
-            # select parents
-            idx1 = tournament_select(fitnesses, tournament_size, rng)
-            idx2 = tournament_select(fitnesses, tournament_size, rng)
-            parent1, parent2 = population[idx1], population[idx2]
-            # crossover
-            child1, child2 = uniform_crossover(parent1, parent2, pc, rng)
-            # mutation
-            child1 = mutate(child1, pm, b, rng)
-            child2 = mutate(child2, pm, b, rng)
-            # add to new population
-            new_population[i] = child1
-            i += 1
-            if i < p:  # case that population is already full
-                new_population[i] = child2
-                i += 1
-
-        # evaluate new population
-        fitnesses_new, stats_new = evaluate_population(new_population, weights, b, eval_counter, fitness_fn)
-        # update best_fitness and history
-        for j in range(len(fitnesses_new)):
-            best_fitness = max(best_fitness, fitnesses_new[j])
-            best_fitness_history[eval_counter[0] - len(fitnesses_new) + j] = best_fitness
-
-            # break in the case that we have reached max evaluations
-            if eval_counter[0] - len(fitnesses_new) + j + 1 >= max_evaluations:
-                break
-
-        # replace population for next generation
-        population = new_population
-        fitnesses, stats = fitnesses_new, stats_new
-        best_idx = np.argmax(fitnesses)
-        best_chromosome = population[best_idx].copy()
-        best_d = float(stats["d"][best_idx])
-
-    elapsed = time.time() - start_time
-    return {
-        "best_fitness": best_fitness,
-        "best_d": best_d,
-        "min_load": stats["min_load"][best_idx],
-        "max_load": stats["max_load"][best_idx],
-        "std_dev": stats["std_dev"][best_idx],
-        "cv": stats["cv"][best_idx],
-        "evaluations": eval_counter[0],
-        "generations": generation,
-        "best_chromosome": best_chromosome,
-        "best_fitness_history": best_fitness_history,
-        "time_sec": elapsed
-    }
-
-def run_experiments(operation_settings: dict, trail_settings: list[dict], problems: list[dict]) -> pd.DataFrame:
-    '''
-    Run experiments for all combinations of problems and trail settings.
-    
-    Parameters:
-        operation_settings: dictionary with keys:
-            "num_trials": int, number of trials per configuration
-            "max_evals": int, maximum number of fitness evaluations per run
-            "pc": float, crossover probability (0 <= pc <= 1)
-            "base_seed": int, base random seed for reproducibility
-        trail_settings: list of dictionaries, each with keys:
-            "p": int, population size
-            "pm": float, mutation probability (0 <= pm <= 1)
-            "tournament_size": int, number of contenders in tournament selection (t >= 2)
-        problems: list of dictionaries, each with keys:
-            "name": str, name of the problem instance
-            "b": int, number of bins
-            "weights": 1d-array of item weights
-    Returns:
-        df: pandas DataFrame with results of all runs
-    '''
-    results = []
-    for prob_idx, prob in enumerate(problems):
-        for setting_idx, setting in enumerate(trail_settings):
-            for trial in range(operation_settings["num_trials"]):
-                seed = operation_settings["base_seed"] + trial + int(setting["pm"]*1000) + setting["tournament_size"]*100
-                res = run_ga(weights=prob["weights"],
-                             b=prob["b"],
-                             p=setting["p"],
-                             pm=setting["pm"],
-                             tournament_size=setting["tournament_size"],
-                             pc=operation_settings["pc"],
-                             max_evaluations=operation_settings["max_evals"],
-                             seed=seed,
-                             fitness_fn=operation_settings["fitness_fn"])
-                results.append({
-                    "problem": prob["name"],
-                    "config_ident": (prob["name"], setting_idx),
-                    "b": prob["b"],
-                    "setting_p": setting["p"],
-                    "setting_pm": setting["pm"],
-                    "setting_tournament": setting["tournament_size"],
-                    "trial": trial+1,
-                    "best_fitness": res["best_fitness"],
-                    "best_d": res["best_d"],
-                    "min_load": res["min_load"],
-                    "max_load": res["max_load"],
-                    "std_dev": res["std_dev"],
-                    "cv": res["cv"],
-                    # "evaluations": res["evaluations"],
-                    # "generations": res["generations"],
-                    "time_sec": res["time_sec"],
-                    "fitness_history": res["best_fitness_history"]
-                })
-                print(f'Completed {prob["name"]} p={setting["p"]} pm={setting["pm"]} t={setting["tournament_size"]} trial={trial+1} ' \
-                      f'-> best_fitness={res["best_fitness"]:.6f} best_d={res["best_d"]:.6f} gens={res["generations"]}')
-
-    df = pd.DataFrame(results)
-    return df
-
-def plot_histories(df_results: pd.DataFrame, operation_settings: dict, trail_settings: list[dict], problems: list[dict]) -> None:
-    '''
-    Plot fitness histories for each problem and trail setting in a 2x2 grid of subplots.
-    
-    Parameters:
-        df_results: results from run_experiments
-        operation_settings: dictionary with key "max_evals" for x-axis limit
-        trail_settings: list of dictionaries with keys "pm" and "tournament_size" for subplot titles
-        problems: list of dictionaries with key "name" for filtering results
-    Returns:
-        None
-    '''
-    max_evals = operation_settings["max_evals"]
-
-    for prob in problems:
-        prob_results = df_results[df_results["problem"] == prob["name"]]
+    def _evaluate_fitness(self, individual) -> float:
+        '''
+        Evaluate the fitness of an individual based on the weight function
+        and fitness function provided
+        '''
+        bin_weights = self._bin_weights(individual)
         
-        fig, axes = plt.subplots(nrows=2, ncols=2, figsize=(12, 8), sharey=True)
-        axes = axes.flatten()  # flatten to 1d-array for easy iteration
+        fitness = self.fitness_function(bin_weights)
+        self.evaluations += 1
 
-        for ax, setting in zip(axes, trail_settings):
-            setting_results = prob_results[
-                (prob_results["setting_pm"] == setting["pm"]) &
-                (prob_results["setting_tournament"] == setting["tournament_size"])
-            ]
-            for _, r in setting_results.iterrows():
-                ax.plot(range(max_evals), r["fitness_history"], alpha=0.7, label=f"trial {r['trial']}")
+        return fitness
+    
+    def _evaluate_population(self) -> np.ndarray:
+        '''
+        Evaluate the fitness of the entire population
+        '''
+        fitnesses = np.zeros(self.population_size)
+        for i in range(self.population_size):
+            fitnesses[i] = self._evaluate_fitness(self.population[i, :])
 
-            ax.set_title(f"p={setting['p']}, pm={setting['pm']}, t={setting['tournament_size']}")
-            ax.set_xlabel("Evaluations")
-            ax.set_ylabel("Best fitness")
-            ax.legend()
+        return fitnesses
+    
+    def _best_individual(self, fitnesses: np.ndarray) -> np.ndarray:
+        '''
+        Return the best individual in the population based on fitnesses
+        '''
+        best_index = np.argmax(fitnesses)
 
-        plt.tight_layout()
-        plt.savefig(f"results/d_history_{prob['name']}.png")
-        plt.show()
+        return self.population[best_index, :]
+    
+    def _tournament_selection(self, fitnesses: np.ndarray) -> np.ndarray:
+        '''
+        Select an individual using tournament selection
+        '''
+        tournament_indices = self.rng.choice(self.population_size, size=self.tournament_size, replace=False)
+        tournament_fitnesses = fitnesses[tournament_indices]
+        winner_index = tournament_indices[np.argmax(tournament_fitnesses)]
 
-def plot_average_histories_single_plot(df_results: pd.DataFrame, operation_settings: dict, trail_settings: list[dict], problems: list[dict]) -> None:
-    '''
-    Plot average fitness histories with std deviation shading for each problem in a single plot.
+        return self.population[winner_index, :]
+    
+    def _crossover(self, parent1: np.ndarray, parent2: np.ndarray) -> np.ndarray:
+        '''
+        Perform uniform crossover between two parents to produce an offspring
+        '''
+        if self.rng.random() < self.crossover_rate:
+            mask = self.rng.integers(0, 2, size=self.num_items).astype(bool)
+            offspring1 = np.where(mask, parent1, parent2)
+            offspring2 = np.where(mask, parent2, parent1)
+            return offspring1, offspring2
+        else:
+            return parent1.copy(), parent2.copy()
+        
+    def _mutate(self, individual: np.ndarray) -> np.ndarray:
+        '''
+        Mutate an individual by randomly reassigning items to bins
+        '''
+        for item_index in range(self.num_items):
+            if self.rng.random() < self.mutation_rate:
+                individual[item_index] = self.rng.integers(1, self.num_bins + 1)
 
-    Parameters:
-        df_results: results from run_experiments
-        operation_settings: dictionary with key "max_evals" for x-axis limit
-        trail_settings: list of dictionaries with keys "pm" and "tournament_size" for legend
-        problems: list of dictionaries with key "name" for filtering results
-    Returns:
-        None
-    '''
-    max_evals = operation_settings["max_evals"]
+        return individual
+    
+    def run(self):
+        '''
+        Run the genetic algorithm until the maximum number of evaluations is reached
+        for the specified number of trials
+        '''
+        for i in range(self.num_trials):
+            # unqiue seed based on trail num and other params
+            seed = (i + 1) * 1e8 + int(self.mutation_rate * 1e6) + self.tournament_size * 1e4 + self.num_bins * 1e2
+            self.rng = np.random.default_rng(int(seed))
+            self.population = self._initialize_population()
+            self.evaluations = 0
+            gen = 0
 
-    for prob in problems:
-        prob_results = df_results[df_results["problem"] == prob["name"]]
+            # Main GA loop
+            while self.evaluations <= self.max_evaluations - self.population_size:
+                # Evaluate population and record best fitness
+                fitnesses = self._evaluate_population()
+                self.fitness_history[i, gen] = np.max(fitnesses)
+                best_individual = self._best_individual(fitnesses)
+                self.best_solutions[i, :] = best_individual
 
-        plt.figure(figsize=(12, 6))
-        plt.title(f"Average Convergence for {prob['name']}", fontsize=16)
+                # Split into separate if to ensure fitness for last gen is recorded without running antother gen
+                if self.evaluations < self.max_evaluations:
+                    new_population = np.zeros_like(self.population)
+                    # Elitism: carry the best individual to the new population
+                    new_population[0, :] = best_individual
+                    for j in range(1, self.population_size, 2):
+                        parent1 = self._tournament_selection(fitnesses)
+                        parent2 = self._tournament_selection(fitnesses)
 
-        for setting in trail_settings:
-            # Filter results for this setting
-            setting_results = prob_results[
-                (prob_results["setting_pm"] == setting["pm"]) &
-                (prob_results["setting_tournament"] == setting["tournament_size"])
-            ]
+                        offspring1, offspring2 = self._crossover(parent1, parent2)
 
-            # Stack all fitness_history arrays: shape = (num_trials, max_evals)
-            fitness_histories = np.stack(setting_results["fitness_history"].values)
-            mean_history = fitness_histories.mean(axis=0)
-            std_history = fitness_histories.std(axis=0)
+                        new_population[j, :] = self._mutate(offspring1)
 
-            label = f"p={setting['p']}, pm={setting['pm']}, t={setting['tournament_size']}"
-            plt.plot(range(max_evals), mean_history, lw=2, label=label)
-            plt.fill_between(range(max_evals),
-                             mean_history - std_history,
-                             mean_history + std_history,
-                             alpha=0.2)
+                        if j + 1 < self.population_size:
+                            new_population[j + 1, :] = self._mutate(offspring2)
 
-        plt.xlabel("Evaluations")
-        plt.ylabel("Best fitness")
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-        plt.savefig(f"results/d_history_avg_{prob['name']}.png")
-        plt.show()
+                    self.population = new_population
+                    gen += 1
+            
+            assert self.evaluations <= self.max_evaluations
+            self.best_bin_weights[i, :] = self._bin_weights(self.best_solutions[i, :])
+        
+        self.has_run = True
+
+    def get_history(self) -> np.ndarray:
+        '''
+        Get the fitness history, best solutions, and best bin weights after running the algorithm
+        '''
+        if not self.has_run:
+            raise RuntimeError("The algorithm must be run before getting history")
+        return self.fitness_history, self.best_solutions, self.best_bin_weights
+    
+def print_statistics(BPP_instance: Bin_packing_problem):
+    """
+    Print statistics for a given BPP_instance after running the GA
+    """
+    total_weight = sum([BPP_instance.weight_function(i) for i in range(1, BPP_instance.num_items + 1)])
+    fitness_history, best_solutions, best_bin_weights = BPP_instance.get_history()
+    last_fitnesses = fitness_history[:, -1] # (num_trials, gen)
+    fitnesses = np.max(last_fitnesses, axis=0)
+    avg_fitness = np.mean(last_fitnesses)
+    std_fitness = np.std(last_fitnesses)
+    
+    best_idx = np.argmax(last_fitnesses, axis=0)
+    std_weight = np.std(best_bin_weights[best_idx], axis=0)
+    best_solution = best_solutions[best_idx]
+    bin_weights = np.zeros(BPP_instance.num_bins)
+    for item_index in range(BPP_instance.num_items):
+        bin_index = best_solution[item_index] - 1
+        bin_weights[bin_index] += BPP_instance.weight_function(item_index + 1)
+    d = np.max(bin_weights) - np.min(bin_weights)
+
+    fitness_lienar = 1 - (d / total_weight)
+    fitness_dev = 100 * d / (2 * total_weight)
+
+    print(f"Bins: {BPP_instance.num_bins}, Mutation Rate: {BPP_instance.mutation_rate}, "
+          f"Tournament Size: {BPP_instance.tournament_size} => Best: {np.max(fitnesses):.5f}, "
+          f"Average: {avg_fitness:.5f}, Std: {std_fitness:.5f}\n" + " " * 33 + 
+          f"For Best Fitness => Std Bin Weight: {std_weight:.5f}, Difference: {d}\n" + " " * 50 +
+          f"=> f_lin: {fitness_lienar:.4f}, f_dev: {fitness_dev:.4f}")
+    
+def plot_history(BPP_instance: Bin_packing_problem, title: str, save_location: str=""):
+    """
+    Plot fitness history for each trial in a 2x2 grid
+    Each BPP_instance in the list represents a different GA parameter config,
+    containing multiple trials internally
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True, sharey=True)
+    axes = axes.flatten()
+
+    plt.rcParams.update({
+        "xtick.labelsize": 14,
+        "ytick.labelsize": 14,
+    })
+
+    for idx, instance in enumerate(BPP_instance):
+        fitness_history, _, _ = instance.get_history()
+        
+        ax = axes[idx]
+        
+        for trial in range(fitness_history.shape[0]):
+            ax.plot(fitness_history[trial, :])
+        
+        ax.set_title(f"pm={instance.mutation_rate}, t={instance.tournament_size}", fontsize=16)
+        ax.set_xlabel("Generation", fontsize=14)
+        ax.set_ylabel("Fitness", fontsize=14)
+
+    fig.suptitle(title, fontsize=20)
+    fig.tight_layout()
+    if not os.path.exists(save_location):
+        os.makedirs(save_location)
+    file_name = f"{save_location}/fitness_history.png"
+    fig.savefig(file_name)
+    plt.show()
+
+def plot_average_history(bpp_instances: list[Bin_packing_problem], title: str, save_location: str = ""):
+    """
+    Plot mean +- range fitness history across multiple trials for each experiment setup
+    Each BPP_instance in the list represents a different GA parameter config,
+    containing multiple trials internally
+    """
+    plt.figure(figsize=(12, 7))
+    plt.rcParams.update({
+        "xtick.labelsize": 14,
+        "ytick.labelsize": 14,
+    })
+
+    for instance in bpp_instances:
+        fitness_history, _, _ = instance.get_history()
+
+        mean_history = fitness_history.mean(axis=0)
+        min_history = fitness_history.min(axis=0)
+        max_history = fitness_history.max(axis=0)
+
+        generations = range(fitness_history.shape[1])
+
+        label = f"pm={instance.mutation_rate}, t={instance.tournament_size}"
+
+        # mean curve
+        plt.plot(generations, mean_history, linewidth=2, label=label)
+
+        # shading
+        plt.fill_between(
+            generations,
+            min_history,
+            max_history,
+            alpha=0.25
+        )
+
+    plt.title(title, fontsize=20)
+    plt.xlabel("Generation", fontsize=16)
+    plt.ylabel("Fitness", fontsize=16)
+    plt.grid(True)
+    plt.legend(fontsize=12)
+    plt.tight_layout()
+
+    if not os.path.exists(save_location):
+        os.makedirs(save_location)
+    file_name = f"{save_location}/fitness_history_avg.png"
+    plt.savefig(file_name)
+
+    plt.show()
+
+def fitness_function(bin_weights):
+    """
+    Fitness function from project brief
+    """
+    d = np.max(bin_weights) - np.min(bin_weights)
+    return 100 / (1 + d)
 
 if __name__ == "__main__":
-    trail_settings = [
-        {"p": 100, "pm": 0.01, "tournament_size": 3},
-        {"p": 100, "pm": 0.05, "tournament_size": 3},
-        {"p": 100, "pm": 0.01, "tournament_size": 7},
-        {"p": 100, "pm": 0.05, "tournament_size": 7}
+
+    # Create an instance of the Bin Packing Problem for BPP1
+    bpp1 = [
+        Bin_packing_problem(
+            num_bins=10,
+            mutation_rate=0.01,
+            tournament_size=3,
+            weight_function=lambda i: i,
+            fitness_function=fitness_function
+        ),
+        Bin_packing_problem(
+            num_bins=10,
+            mutation_rate=0.05,
+            tournament_size=3,
+            weight_function=lambda i: i,
+            fitness_function=fitness_function
+        ),
+        Bin_packing_problem(
+            num_bins=10,
+            mutation_rate=0.01,
+            tournament_size=7,
+            weight_function=lambda i: i,
+            fitness_function=fitness_function
+        ),
+        Bin_packing_problem(
+            num_bins=10,
+            mutation_rate=0.05,
+            tournament_size=7,
+            weight_function=lambda i: i,
+            fitness_function=fitness_function
+        )
     ]
-    problems = [
-        {"name": "BPP1", "b": 10, "weights": np.arange(1,501, dtype=float)},            # weight i = i
-        {"name": "BPP2", "b": 50, "weights": (np.arange(1,501, dtype=float)**2) / 2.0}  # weight i = i^2 / 2
+
+    for instance in bpp1:
+        # Run the genetic algorithm
+        instance.run()
+
+    # Print statistics for BPP1
+    print("-" * 44 + " Results for BPP1 " + "-"*43)
+    for instance in bpp1:
+        print_statistics(instance)
+    print("-" * 105)
+
+    bpp2 = [
+        Bin_packing_problem(
+            num_bins=50,
+            mutation_rate=0.01,
+            tournament_size=3,
+            weight_function=lambda i: (i ** 2) / 2,
+            fitness_function=fitness_function
+        ),
+        Bin_packing_problem(
+            num_bins=50,
+            mutation_rate=0.05,
+            tournament_size=3,
+            weight_function=lambda i: (i ** 2) / 2,
+            fitness_function=fitness_function
+        ),
+        Bin_packing_problem(
+            num_bins=50,
+            mutation_rate=0.01,
+            tournament_size=7,
+            weight_function=lambda i: (i ** 2) / 2,
+            fitness_function=fitness_function
+        ),
+        Bin_packing_problem(
+            num_bins=50,
+            mutation_rate=0.05,
+            tournament_size=7,
+            weight_function=lambda i: (i ** 2) / 2,
+            fitness_function=fitness_function
+        )
     ]
-    operation_settings = {
-        "num_trials": 5,
-        "max_evals": 10000,
-        "pc": 0.8,
-        "base_seed": 12345,
-        "fitness_fn": fitness_diff_based
-    }
 
-    df_results = run_experiments(operation_settings, trail_settings, problems)
+    for instance in bpp2:
+        # Run the genetic algorithm
+        instance.run()
 
-    df_results_grouped = df_results.groupby(["config_ident"])
-    for config_ident, group_df in df_results_grouped:
-        problem_name, setting_idx = config_ident[0]
-        assert len(group_df) == operation_settings["num_trials"], \
-            f'Group (problem={problem_name}, setting_i={setting_idx}) has {len(group_df)} rows instead of {operation_settings["num_trials"]}'
+    # Print statistics for BPP1
+    print("-" * 44 + " Results for BPP2 " + "-"*43)
+    for instance in bpp2:
+        print_statistics(instance)
+    print("-" * 105)
 
-        print(f"\nGroup: problem={problem_name}, setting_i={setting_idx}")
-        print(group_df.drop(columns=["fitness_history"], inplace=False))
+    extension = Bin_packing_problem(
+            num_bins=10,
+            mutation_rate=0.001,
+            tournament_size=10,
+            weight_function=lambda i: i,
+            fitness_function=fitness_function
+    )
 
-    avg_df = df_results_grouped.mean(numeric_only=True).reset_index()
-    avg_df["problem"] = avg_df["config_ident"].apply(lambda x: x[0])
-    # move "problem" to the front for nicer printing
-    cols = ["problem"] + [c for c in avg_df.columns if c != "problem"]
-    avg_df = avg_df[cols]
+    extension.run()
 
-    print("\nAverage")
-    print(avg_df)
+    print("-" * 41 + " Results for Extension " + "-"*40)
+    print_statistics(extension)
+    print("-" * 105)
 
-    if not os.path.exists("results"):
-        os.mkdir("results")
-
-    plot_histories(df_results, operation_settings, trail_settings, problems)
-    plot_average_histories_single_plot(df_results, operation_settings, trail_settings, problems)
+    # Plotting
+    plot_history(bpp1, title="Fitness History for BPP1", save_location="results/bpp1")
+    plot_history(bpp2, title="Fitness History for BPP2", save_location="results/bpp2")
+    plot_average_history(bpp1, title="Average Fitness History for BPP1", save_location="results/bpp1")
+    plot_average_history(bpp2, title="Average Fitness History for BPP2", save_location="results/bpp2")
+    plot_average_history([extension], title="Average Fitness History for Extension", save_location="results/extension")
