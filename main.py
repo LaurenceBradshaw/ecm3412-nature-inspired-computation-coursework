@@ -41,12 +41,21 @@ class Bin_packing_problem:
         Initialize the population with random bin assignments
         Each individual is represented as an array of integers, where each 
         integer indicates the bin assignment for the corresponding item
+        Bin indices range from 1 to num_bins inclusive
+
+        Returns:
+            A 2D array representing the initial population (population_size, num_items)
         '''
         return self.rng.integers(1, self.num_bins + 1, size=(self.population_size, self.num_items))
     
-    def _bin_weights(self, individual) -> np.ndarray:
+    def _bin_weights(self, individual: np.ndarray) -> np.ndarray:
         '''
         Calculate the weights of each bin for a given individual
+
+        Args:
+            individual: An array representing the bin assignments for each item
+        Returns:
+            An array containing the total weights of each bin
         '''
         bin_weights = np.zeros(self.num_bins)
         for item_index in range(self.num_items):
@@ -59,6 +68,11 @@ class Bin_packing_problem:
         '''
         Evaluate the fitness of an individual based on the weight function
         and fitness function provided
+
+        Args:
+            individual: An array representing the bin assignments for each item
+        Returns:
+            The fitness value of the individual
         '''
         bin_weights = self._bin_weights(individual)
         
@@ -70,6 +84,9 @@ class Bin_packing_problem:
     def _evaluate_population(self) -> np.ndarray:
         '''
         Evaluate the fitness of the entire population
+
+        Returns:
+            An array containing the fitness values for each individual in the population
         '''
         fitnesses = np.zeros(self.population_size)
         for i in range(self.population_size):
@@ -80,6 +97,11 @@ class Bin_packing_problem:
     def _best_individual(self, fitnesses: np.ndarray) -> np.ndarray:
         '''
         Return the best individual in the population based on fitnesses
+
+        Args:
+            fitnesses: An array containing the fitness values for each individual
+        Returns:
+            The individual with the highest fitness
         '''
         best_index = np.argmax(fitnesses)
 
@@ -88,6 +110,11 @@ class Bin_packing_problem:
     def _tournament_selection(self, fitnesses: np.ndarray) -> np.ndarray:
         '''
         Select an individual using tournament selection
+
+        Args:
+            fitnesses: An array containing the fitness values for each individual
+        Returns:
+            The selected individual from a tournament
         '''
         tournament_indices = self.rng.choice(self.population_size, size=self.tournament_size, replace=False)
         tournament_fitnesses = fitnesses[tournament_indices]
@@ -95,9 +122,15 @@ class Bin_packing_problem:
 
         return self.population[winner_index, :]
     
-    def _crossover(self, parent1: np.ndarray, parent2: np.ndarray) -> np.ndarray:
+    def _crossover(self, parent1: np.ndarray, parent2: np.ndarray) -> tuple[np.ndarray]:
         '''
         Perform uniform crossover between two parents to produce an offspring
+
+        Args:
+            parent1: The first parent individual
+            parent2: The second parent individual
+        Returns:
+            Two offspring individuals resulting from crossover
         '''
         if self.rng.random() < self.crossover_rate:
             mask = self.rng.integers(0, 2, size=self.num_items).astype(bool)
@@ -110,6 +143,11 @@ class Bin_packing_problem:
     def _mutate(self, individual: np.ndarray) -> np.ndarray:
         '''
         Mutate an individual by randomly reassigning items to bins
+
+        Args:
+            individual: The individual to be mutated
+        Returns:
+            The mutated individual
         '''
         for item_index in range(self.num_items):
             if self.rng.random() < self.mutation_rate:
@@ -117,7 +155,7 @@ class Bin_packing_problem:
 
         return individual
     
-    def run(self):
+    def run(self) -> None:
         '''
         Run the genetic algorithm until the maximum number of evaluations is reached
         for the specified number of trials
@@ -162,17 +200,26 @@ class Bin_packing_problem:
         
         self.has_run = True
 
-    def get_history(self) -> np.ndarray:
+    def get_history(self) -> tuple[np.ndarray]:
         '''
         Get the fitness history, best solutions, and best bin weights after running the algorithm
+
+        Returns:
+            A tuple containing:
+            - fitness_history: A 2D array of fitness values over generations for each trial
+            - best_solutions: A 2D array of the best solutions found in each trial
+            - best_bin_weights: A 2D array of the bin weights corresponding to the best solutions
         '''
         if not self.has_run:
             raise RuntimeError("The algorithm must be run before getting history")
         return self.fitness_history, self.best_solutions, self.best_bin_weights
     
-def print_statistics(BPP_instance: Bin_packing_problem):
+def print_statistics(BPP_instance: Bin_packing_problem) -> None:
     """
     Print statistics for a given BPP_instance after running the GA
+
+    Args:
+        BPP_instance: An instance of the Bin_packing_problem class
     """
     total_weight = sum([BPP_instance.weight_function(i) for i in range(1, BPP_instance.num_items + 1)])
     fitness_history, best_solutions, best_bin_weights = BPP_instance.get_history()
@@ -199,11 +246,16 @@ def print_statistics(BPP_instance: Bin_packing_problem):
           f"For Best Fitness => Std Bin Weight: {std_weight:.5f}, Difference: {d}\n" + " " * 50 +
           f"=> f_lin: {fitness_lienar:.4f}, f_dev: {fitness_dev:.4f}")
     
-def plot_history(BPP_instance: Bin_packing_problem, title: str, save_location: str=""):
+def plot_history(BPP_instance: Bin_packing_problem, title: str, save_location: str="") -> None:
     """
     Plot fitness history for each trial in a 2x2 grid
     Each BPP_instance in the list represents a different GA parameter config,
     containing multiple trials internally
+
+    Args:
+        BPP_instance: A list of Bin_packing_problem instances
+        title: Title for the entire figure
+        save_location: Directory to save the plot
     """
     fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True, sharey=True)
     axes = axes.flatten()
@@ -233,11 +285,16 @@ def plot_history(BPP_instance: Bin_packing_problem, title: str, save_location: s
     fig.savefig(file_name)
     plt.show()
 
-def plot_average_history(bpp_instances: list[Bin_packing_problem], title: str, save_location: str = ""):
+def plot_average_history(bpp_instances: list[Bin_packing_problem], title: str, save_location: str = "") -> None:
     """
     Plot mean +- range fitness history across multiple trials for each experiment setup
     Each BPP_instance in the list represents a different GA parameter config,
     containing multiple trials internally
+
+    Args:
+        bpp_instances: A list of Bin_packing_problem instances
+        title: Title for the entire figure
+        save_location: Directory to save the plot
     """
     plt.figure(figsize=(12, 7))
     plt.rcParams.update({
@@ -284,6 +341,9 @@ def plot_average_history(bpp_instances: list[Bin_packing_problem], title: str, s
 def fitness_function(bin_weights):
     """
     Fitness function from project brief
+
+    Args:
+        bin_weights: An array containing the total weights of each bin
     """
     d = np.max(bin_weights) - np.min(bin_weights)
     return 100 / (1 + d)
